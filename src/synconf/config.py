@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Iterator
 
+from beartype.door import is_bearable
+
 from synconf.introspection.spec import CallableSpec
 from synconf.resolution.resolver import TYPE_KEY
 
@@ -25,34 +27,51 @@ class Config:
         self,
         data: dict[str, Any],
         spec: CallableSpec | None = None,
+        path: str = "",
     ) -> None:
         """Initialize a Config from a dictionary.
 
         Args:
             data: The configuration dictionary.
             spec: Optional CallableSpec for this config level.
+            path: Dot-separated path identifying this config's position in the tree.
         """
         # Use object.__setattr__ to avoid triggering __setattr__
         object.__setattr__(self, "_data", data)
         object.__setattr__(self, "_spec", spec)
+        object.__setattr__(self, "_path", path)
 
     def __getitem__(self, key: str) -> Any:
         """Get a value by key (dict-style access).
 
+        Supports dot-notation for nested access (e.g. ``config["optimizer.lr"]``).
+        Direct key lookup takes priority; dot-splitting is only attempted when
+        the literal key is absent.
+
         Args:
-            key: The configuration key.
+            key: The configuration key, optionally dot-separated for nested access.
 
         Returns:
-            The value, wrapped in Config if it's a dict with TYPE.
+            The value, wrapped in Config if it's a dict.
 
         Raises:
-            KeyError: If the key doesn't exist.
+            KeyError: If the key (or any segment of a dotted path) doesn't exist.
         """
-        if key not in self._data:
-            raise KeyError(f"Config key not found: '{key}'")
+        # Direct key lookup takes priority over dot-notation splitting
+        if key in self._data:
+            return self._wrap_value(self._data[key], key)
 
-        value = self._data[key]
-        return self._wrap_value(value)
+        # Attempt dot-notation traversal
+        if "." in key:
+            parts = key.split(".")
+            current: Any = self
+            for part in parts:
+                if not isinstance(current, Config):
+                    raise KeyError(f"Config key not found: '{key}'")
+                current = current[part]
+            return current
+
+        raise KeyError(f"Config key not found: '{key}'")
 
     def __getattr__(self, name: str) -> Any:
         """Get a value by attribute name (attribute-style access).
@@ -76,24 +95,51 @@ class Config:
             raise AttributeError(f"Config has no attribute '{name}'")
 
     def __setitem__(self, key: str, value: Any) -> None:
-        """Set a value by key.
+        """Set a value by key, validating against spec if available.
+
+        Supports dot-notation for nested assignment (e.g. ``config["optimizer.lr"] = 0.1``).
+        Direct key takes priority; dot-splitting is only attempted when the literal key
+        is absent and the key contains a dot.
 
         Args:
-            key: The configuration key.
+            key: The configuration key, optionally dot-separated for nested access.
             value: The value to set.
+
+        Raises:
+            TypeError: If the value doesn't match the spec's type hint.
+            KeyError: If an intermediate segment of a dotted path doesn't exist.
         """
-        self._data[key] = value
+        # Direct key assignment (including literal dotted keys already in _data)
+        if "." not in key or key in self._data:
+            self._validate_assignment(key, value)
+            self._data[key] = value
+            return
+
+        # Dot-notation traversal to the parent, then set the leaf
+        parts = key.split(".")
+        current: Any = self
+        for part in parts[:-1]:
+            if not isinstance(current, Config):
+                raise KeyError(f"Cannot set '{key}': intermediate key '{part}' is not a Config")
+            current = current[part]
+        if not isinstance(current, Config):
+            raise KeyError(f"Cannot set '{key}': parent is not a Config")
+        current[parts[-1]] = value
 
     def __setattr__(self, name: str, value: Any) -> None:
-        """Set a value by attribute name.
+        """Set a value by attribute name, validating against spec if available.
 
         Args:
             name: The attribute/key name.
             value: The value to set.
+
+        Raises:
+            TypeError: If the value doesn't match the spec's type hint.
         """
         if name.startswith("_"):
             object.__setattr__(self, name, value)
         else:
+            self._validate_assignment(name, value)
             self._data[name] = value
 
     def __contains__(self, key: str) -> bool:
@@ -150,7 +196,7 @@ class Config:
             The value or default.
         """
         if key in self._data:
-            return self._wrap_value(self._data[key])
+            return self._wrap_value(self._data[key], key)
         return default
 
     def keys(self) -> list[str]:
@@ -167,7 +213,7 @@ class Config:
         Returns:
             List of values (with dicts wrapped as Config).
         """
-        return [self._wrap_value(v) for v in self._data.values()]
+        return [self._wrap_value(v, k) for k, v in self._data.items()]
 
     def items(self) -> list[tuple[str, Any]]:
         """Get all key-value pairs.
@@ -175,7 +221,7 @@ class Config:
         Returns:
             List of (key, value) tuples (with dicts wrapped as Config).
         """
-        return [(k, self._wrap_value(v)) for k, v in self._data.items()]
+        return [(k, self._wrap_value(v, k)) for k, v in self._data.items()]
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to a plain dictionary.
@@ -207,12 +253,15 @@ class Config:
         Raises:
             ValueError: If TYPE is missing or not callable.
         """
+        # Include path in error messages for clear diagnostics
+        path_desc = f" '{self._path}'" if self._path else ""
+
         if TYPE_KEY not in self._data:
-            raise ValueError("Cannot init: no TYPE specified in config")
+            raise ValueError(f"Cannot init{path_desc}: no TYPE specified in config")
 
         type_callable = self._data[TYPE_KEY]
         if not callable(type_callable):
-            raise ValueError(f"Cannot init: TYPE is not callable: {type_callable}")
+            raise ValueError(f"Cannot init{path_desc}: TYPE is not callable: {type_callable}")
 
         # Build kwargs from config (excluding TYPE)
         kwargs = {}
@@ -220,14 +269,19 @@ class Config:
             if key == TYPE_KEY:
                 continue
 
+            child_path = f"{self._path}.{key}" if self._path else key
+
             # Recursively init nested configs
             if isinstance(value, dict) and TYPE_KEY in value:
-                nested_config = Config(value)
+                nested_config = Config(value, path=child_path)
                 kwargs[key] = nested_config.init()
             # Handle lists containing configs with TYPE
             elif isinstance(value, list):
                 kwargs[key] = [
-                    Config(item).init() if isinstance(item, dict) and TYPE_KEY in item else item for item in value
+                    Config(item, path=f"{child_path}[{i}]").init()
+                    if isinstance(item, dict) and TYPE_KEY in item
+                    else item
+                    for i, item in enumerate(value)
                 ]
             else:
                 kwargs[key] = value
@@ -245,23 +299,61 @@ class Config:
         """Deprecated alias for init()."""
         return self.init(**overwrites)
 
-    def _wrap_value(self, value: Any) -> Any:
+    def _wrap_value(self, value: Any, key: str = "") -> Any:
         """Wrap a dict value as Config if it has a TYPE key.
 
         Args:
             value: The value to potentially wrap.
+            key: The key used to access this value, for path propagation.
 
         Returns:
             Config-wrapped value if applicable, otherwise the original value.
         """
+        # If value is already a Config, return as-is
+        if isinstance(value, Config):
+            return value
+
+        child_path = f"{self._path}.{key}" if self._path else key
+
         if isinstance(value, dict) and TYPE_KEY in value:
-            return Config(value)
+            return Config(value, path=child_path)
 
         # Also wrap plain dicts for consistent access
         if isinstance(value, dict):
-            return Config(value)
+            return Config(value, path=child_path)
 
         return value
+
+    def _validate_assignment(self, key: str, value: Any) -> None:
+        """Validate a value against the spec's type hint for the given key.
+
+        Only validates if a spec is attached and the key exists in the spec's parameters.
+        New keys (not in the spec) are allowed without validation.
+
+        Args:
+            key: The configuration key being set.
+            value: The value being assigned.
+
+        Raises:
+            TypeError: If the value doesn't match the spec's type hint.
+        """
+        if self._spec is None:
+            return
+
+        all_params = self._spec.get_all_params()
+        if key not in all_params:
+            return
+
+        param = all_params[key]
+        if param.type_hint is not None and not is_bearable(value, param.type_hint):
+            parts = ["source: manual assignment"]
+            if param.source:
+                parts.append(f"owner: {param.source.name}")
+            metadata = " [" + ", ".join(parts) + "]"
+            raise TypeError(
+                f"Invalid type for '{key}': expected {param.format_type()}, "
+                f"got {type(value).__name__} {value!r}{metadata}"
+            )
 
     def _dict_to_plain(self, d: dict[str, Any]) -> dict[str, Any]:
         """Convert a nested dict to plain dict.

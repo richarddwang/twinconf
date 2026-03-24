@@ -28,7 +28,7 @@ config = parser.parse("--model.hidden_size=not_an_int")
 By default, SynConf performs strict validation checking for:
 
 1. **Missing required parameters** - Parameters without defaults that aren't provided
-2. **Unknown parameters** - Parameters provided that don't exist in the spec
+2. **Unexpected parameters** - Parameters provided that don't exist in the spec
 3. **Type mismatches** - Values that don't match type hints
 
 ### Missing Required Parameters
@@ -47,7 +47,7 @@ config = parser.parse("--model.dropout=0.2")
 #   Missing required parameter: 'model.hidden_size'
 ```
 
-### Unknown Parameters
+### Unexpected Parameters
 
 ```python
 class Model:
@@ -60,7 +60,7 @@ parser.add("model", Model)
 # 'unknown_param' doesn't exist in Model
 config = parser.parse("--model.hidden_size=128", "--model.unknown_param=value")
 # ValueError: Configuration validation failed:
-#   Unknown parameter: 'model.unknown_param'
+#   Unexpected parameter: 'model.unknown_param'
 ```
 
 This catches typos and configuration errors early:
@@ -68,7 +68,7 @@ This catches typos and configuration errors early:
 ```bash
 # Typo: 'hidden_siez' instead of 'hidden_size'
 python train.py --model.hidden_siez=128
-# Error: Unknown parameter: 'model.hidden_siez'
+# Error: Unexpected parameter: 'model.hidden_siez'
 ```
 
 ## TYPE Compatibility
@@ -216,9 +216,9 @@ Invalid type for 'model.hidden_size': expected int, got str ('not_an_int')
 Missing required parameter: 'model.hidden_size'
 ```
 
-### Unknown Parameter
+### Unexpected Parameter
 ```
-Unknown parameter: 'model.unknown_param'
+Unexpected parameter: 'model.unknown_param'
 ```
 
 ### TYPE Incompatibility

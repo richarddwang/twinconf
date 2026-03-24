@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 TYPE_KEY = "TYPE"
 
 # Special TYPE value to convert dict to list
-LIST_TYPE = "LIST"
+LIST = "LIST"
 
 
 class Resolver:
@@ -56,7 +56,7 @@ class Resolver:
             type_value: The TYPE value (string path, registered name, or callable).
 
         Returns:
-            The resolved callable, or LIST_TYPE if it's the special list marker.
+            The resolved callable, or LIST if it's the special list marker.
 
         Raises:
             ValueError: If the TYPE cannot be resolved.
@@ -69,9 +69,9 @@ class Resolver:
         if not isinstance(type_value, str):
             raise ValueError(f"TYPE must be a string or callable, got {type(type_value).__name__}")
 
-        # Handle special LIST_TYPE marker
-        if type_value == LIST_TYPE:
-            return LIST_TYPE
+        # Handle special LIST marker
+        if type_value == LIST:
+            return LIST
 
         # Try registry first
         if type_value in self._registry:
@@ -178,7 +178,6 @@ class Resolver:
 
         result = {}
         resolved_callable = None
-        resolved_spec = None
         is_list_type = False
 
         for key, value in obj.items():
@@ -189,7 +188,7 @@ class Resolver:
                 resolved = self.resolve(value)
 
                 # Check if this is a LIST type
-                if resolved == LIST_TYPE:
+                if resolved == LIST:
                     is_list_type = True
                     # Don't include TYPE in result for lists
                     continue

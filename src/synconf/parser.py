@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import itertools
 from typing import Any, Callable
 
@@ -11,6 +12,7 @@ import yaml
 from synconf.config import Config
 from synconf.help import HelpBuilder
 from synconf.introspection import CallableSpec, Introspector
+from synconf.introspection.spec import ParamSpec
 from synconf.loading.cli_loader import CliLoader, is_cli_arg
 from synconf.loading.merger import Merger
 from synconf.loading.yaml_loader import YamlLoader, is_yaml_file
@@ -50,19 +52,49 @@ class SynConfParser:
 
         # Registered groups: group_key -> (CallableSpec, expected_type)
         self._groups: dict[str, tuple[CallableSpec, type | None]] = {}
+        # Standalone arguments: arg_name -> ParamSpec
+        self._standalone_args: dict[str, ParamSpec] = {}
 
-    def add(self, group_key: str, target: type | Callable[..., Any]) -> None:
-        """Register a callable under a group key.
+    def add(
+        self,
+        key: str,
+        target: type | Callable[..., Any] | None = None,
+        *,
+        type_hint: type | None = None,
+        default: Any = inspect.Parameter.empty,
+        required: bool | None = None,
+        description: str | None = None,
+    ) -> None:
+        """Register a callable group or a standalone argument.
+
+        When `target` is a callable (class, function, method), registers it as a group.
+        When `type_hint=` keyword is provided, registers a standalone argument.
 
         Args:
-            group_key: The key under which this callable's parameters will be grouped.
-            target: A class, function, or method to introspect.
+            key: The key for this group or argument.
+            target: A class, function, or method to introspect (for groups).
+            type_hint: Type hint for a standalone argument.
+            default: Default value for a standalone argument.
+            required: Whether the standalone argument is required. Defaults to True if no default.
+            description: Description for a standalone argument.
 
         Example:
-            >>> parser.add("optimizer", Adam)
-            >>> # Config will have structure: optimizer: { TYPE: Adam, lr: ..., ... }
+            >>> parser.add("optimizer", Adam)                       # group
+            >>> parser.add("num_trials", type_hint=int)             # standalone required arg
+            >>> parser.add("seed", type_hint=int, default=42)       # standalone with default
         """
-        # Introspect the target
+        # Standalone argument mode
+        if target is None or type_hint is not None:
+            if type_hint is None:
+                raise ValueError(f"add('{key}'): must provide either a callable target or type_hint= keyword")
+            if required is None:
+                required = default is inspect.Parameter.empty
+            self._standalone_args[key] = ParamSpec(
+                name=key, type_hint=type_hint, default=default, description=description
+            )
+            return
+
+        # Group mode: introspect the target callable
         spec = self._introspector.analyze(target)
 
         # Determine expected type for compatibility checking
@@ -81,13 +113,15 @@ class SynConfParser:
         self._register_delegees(spec)
 
         # Store the group
-        self._groups[group_key] = (spec, expected_type)
+        self._groups[key] = (spec, expected_type)
 
     def parse(self, *sources: str) -> Config:
         """Parse configuration from multiple sources.
 
         Sources are processed in order. Later sources override earlier ones.
         Sources can be YAML file paths or CLI arguments (starting with --).
+        Use ``--help`` to print help for all groups, or ``--help=<key_path>``
+        to print help for a specific section (e.g., ``--help=optimizer``).
 
         Resolution order:
         1. Load sources
@@ -103,17 +137,54 @@ class SynConfParser:
         Returns:
             Config object with merged and validated configuration.
 
+        Raises:
+            SystemExit: When ``--help`` is present (prints help and exits).
+
         Example:
             >>> config = parser.parse("base.yaml", "--lr=0.01", "override.yaml")
         """
-        # 1. Load all sources
+        import sys
+
+        # Detect --help / --help=<key_path> before normal parsing
+        help_requested = False
+        help_filter: str | None = None
+        parse_sources: list[str] = []
+
+        for source in sources:
+            if source in ("--help", "-h"):
+                help_requested = True
+            elif source.startswith("--help="):
+                help_requested = True
+                help_filter = source[7:]
+            else:
+                parse_sources.append(source)
+
+        if help_requested:
+            # Parse remaining sources to show actual config values in help
+            config_data: dict[str, Any] | None = None
+            if parse_sources:
+                try:
+                    config = self.parse(*parse_sources)
+                    config_data = config.to_dict()
+                except (ValueError, TypeError):
+                    pass  # Show help with defaults if parsing fails
+            print(self.help(config_data, key_path_filter=help_filter))
+            sys.exit(0)
+
+        # 1. Load all sources and track value origins
         configs: list[dict[str, Any]] = []
+        source_map: dict[str, str] = {}  # key_path -> source label
 
         for source in sources:
             if is_yaml_file(source):
-                configs.append(self._yaml_loader.load(source))
+                loaded = self._yaml_loader.load(source)
+                configs.append(loaded)
+                # Track source for each key path in this YAML
+                self._track_sources(loaded, source_map, source.rsplit("/", 1)[-1])
             elif is_cli_arg(source):
-                configs.append(self._cli_loader.parse(source))
+                loaded = self._cli_loader.parse(source)
+                configs.append(loaded)
+                self._track_sources(loaded, source_map, "CLI")
             else:
                 raise ValueError(f"Unknown source type: {source} (must be .yaml/.yml file or --arg=value)")
 
@@ -121,7 +192,7 @@ class SynConfParser:
         merged = self._merger.merge_all(configs)
 
         # 3-6. Resolve, impute, interpolate, validate
-        return self._resolve_merged(merged)
+        return self._resolve_merged(merged, source_map)
 
     def parse_args(self, args: list[str] | None = None) -> Config | list[Config]:
         """Parse configuration from command line arguments.
@@ -139,11 +210,15 @@ class SynConfParser:
         if args is None:
             args = sys.argv[1:]
 
-        # Check for --help or --help.<key_path>
+        # Check for --help, --help=<key_path>, or --help.<key_path>
         key_path_filter = None
         for arg in args:
             if arg == "--help" or arg == "-h":
                 print(self.help())
+                sys.exit(0)
+            elif arg.startswith("--help="):
+                key_path_filter = arg[7:]
+                print(self.help(key_path_filter=key_path_filter))
                 sys.exit(0)
             elif arg.startswith("--help."):
                 key_path_filter = arg[7:]  # Extract key path after "--help."
@@ -160,12 +235,17 @@ class SynConfParser:
         # Sweep mode - generate all combinations
         # First, load and merge base configuration
         configs: list[dict[str, Any]] = []
+        source_map: dict[str, str] = {}
 
         for source in base_args:
             if is_yaml_file(source):
-                configs.append(self._yaml_loader.load(source))
+                loaded = self._yaml_loader.load(source)
+                configs.append(loaded)
+                self._track_sources(loaded, source_map, source.rsplit("/", 1)[-1])
             elif is_cli_arg(source):
-                configs.append(self._cli_loader.parse(source))
+                loaded = self._cli_loader.parse(source)
+                configs.append(loaded)
+                self._track_sources(loaded, source_map, "CLI")
             else:
                 raise ValueError(f"Unknown source type: {source} (must be .yaml/.yml file or --arg=value)")
 
@@ -175,7 +255,7 @@ class SynConfParser:
         sweep_configs = self._generate_sweep_configs(base_merged, sweep_values)
 
         # Resolve each swept config using shared resolution logic
-        return [self._resolve_merged(sweep_config) for sweep_config in sweep_configs]
+        return [self._resolve_merged(sweep_config, source_map) for sweep_config in sweep_configs]
 
     def help(self, config_data: dict[str, Any] | None = None, key_path_filter: str | None = None) -> str:
         """Generate help text for all registered groups.
@@ -203,23 +283,28 @@ class SynConfParser:
             return self._groups[group_key][0]
         return None
 
-    def _resolve_merged(self, merged: dict[str, Any]) -> Config:
+    def _resolve_merged(self, merged: dict[str, Any], source_map: dict[str, str] | None = None) -> Config:
         """Apply resolution pipeline to merged config.
 
         Resolution steps:
         1. Resolve TYPE keys (including LIST conversion)
         2. Impute default values from specs
         3. Resolve ~{...} interpolations
-        4. Validate against type hints
+        4. Validate against type hints (all errors collected at once)
 
         Args:
             merged: Merged configuration dictionary.
+            source_map: Optional mapping of key paths to their value sources.
 
         Returns:
             Validated Config object.
         """
+        source_map = source_map or {}
+
         # Resolve TYPE keys for each group (with its spec for nested validation)
         resolved: dict[str, Any] = {}
+        all_errors: list[str] = []  # Collect all errors (TYPE compat + validation)
+
         for group_key, (spec, expected_type) in self._groups.items():
             if group_key in merged:
                 # Build expected_types for backward compatibility (top-level only)
@@ -228,34 +313,65 @@ class SynConfParser:
                     expected_types[group_key] = expected_type
 
                 # Resolve this group with its spec for nested TYPE validation
-                resolved[group_key] = self._resolver.resolve_in_config(
-                    {group_key: merged[group_key]}, expected_types, spec=spec
-                )[group_key]
+                try:
+                    resolved[group_key] = self._resolver.resolve_in_config(
+                        {group_key: merged[group_key]}, expected_types, spec=spec
+                    )[group_key]
+                except TypeError as e:
+                    # Collect TYPE compatibility error with source info
+                    type_path = f"{group_key}.TYPE"
+                    source = source_map.get(type_path, "")
+                    source_suffix = f" [source: {source}]" if source else ""
+                    all_errors.append(f"{e}{source_suffix}")
+                    # Keep merged config for further error collection
+                    resolved[group_key] = merged[group_key]
 
         # Also resolve any top-level keys not in groups
         for key in merged:
             if key not in self._groups and key not in resolved:
                 resolved[key] = merged[key]
 
-        # Impute default values from specs
+        # Impute default values from specs (including groups with no user data)
+        for group_key, (spec, _) in self._groups.items():
+            # Initialize empty groups so defaults get imputed and validated
+            if group_key not in resolved:
+                resolved[group_key] = {}
+
+            # Inject default TYPE if missing
+            if TYPE_KEY not in resolved[group_key]:
+                resolved[group_key][TYPE_KEY] = spec.callable_obj
+
+            # Impute other default parameter values
+            self._impute_defaults(resolved[group_key], spec, group_key, source_map)
+
+        # Impute defaults for standalone args
+        for arg_name, param_spec in self._standalone_args.items():
+            if arg_name not in resolved and not param_spec.is_required:
+                resolved[arg_name] = param_spec.default
+                source_map[arg_name] = "default value"
+
+        # Resolve ~{...} interpolations (errors collected by interpolator)
+        resolved, interp_errors = self._interpolator.resolve_all(resolved)
+        all_errors.extend(interp_errors)
+
+        # Validate all groups and standalone args, collecting all errors at once
         for group_key, (spec, _) in self._groups.items():
             if group_key in resolved:
-                # Inject default TYPE if missing
-                if TYPE_KEY not in resolved[group_key]:
-                    resolved[group_key][TYPE_KEY] = spec.callable_obj
+                errors = self._validator.validate_or_raise(resolved[group_key], spec, group_key, source_map=source_map)
+                all_errors.extend(errors)
 
-                # Impute other default parameter values
-                self._impute_defaults(resolved[group_key], spec)
+        # Validate standalone args and unknown top-level keys
+        standalone_errors = self._validator.validate_standalone(
+            resolved, self._standalone_args, set(self._groups.keys()), source_map=source_map
+        )
+        all_errors.extend(standalone_errors)
 
-        # Resolve ~{...} interpolations
-        resolved = self._interpolator.resolve_all(resolved)
+        # Raise all errors at once
+        if all_errors:
+            raise ValueError("Configuration validation failed:\n  " + "\n  ".join(all_errors))
 
-        # Validate configuration
-        for group_key, (spec, _) in self._groups.items():
-            if group_key in resolved:
-                self._validator.validate_or_raise(resolved[group_key], spec, group_key)
-
-        return Config(resolved)
+        # Build Config with specs for assignment validation
+        return self._build_config(resolved)
 
     def _parse_sweep_args(self, args: list[str]) -> tuple[list[str], dict[str, list[Any]]]:
         """Parse sweep arguments from command line.
@@ -352,12 +468,20 @@ class SynConfParser:
         # Set final value
         current[parts[-1]] = value
 
-    def _impute_defaults(self, config: dict[str, Any], spec: CallableSpec) -> None:
+    def _impute_defaults(
+        self,
+        config: dict[str, Any],
+        spec: CallableSpec,
+        group_key: str = "",
+        source_map: dict[str, str] | None = None,
+    ) -> None:
         """Impute default values from spec into config.
 
         Args:
             config: Configuration dictionary to modify.
             spec: CallableSpec with parameter defaults.
+            group_key: Group key prefix for source map tracking.
+            source_map: Optional source map to track default value origins.
         """
         all_params = spec.get_all_params()
 
@@ -373,6 +497,11 @@ class SynConfParser:
             # Impute the default value
             config[param_name] = param_spec.default
 
+            # Track source as "default value"
+            if source_map is not None:
+                key_path = f"{group_key}.{param_name}" if group_key else param_name
+                source_map[key_path] = "default value"
+
     def _register_delegees(self, spec: CallableSpec) -> None:
         """Register all callables found through kwargs delegation.
 
@@ -387,3 +516,34 @@ class SynConfParser:
 
             # Recursively register delegees of delegees
             self._register_delegees(delegee_spec)
+
+    def _build_config(self, resolved: dict[str, Any]) -> Config:
+        """Build a Config tree with specs attached for assignment validation.
+
+        Args:
+            resolved: The resolved configuration dictionary.
+
+        Returns:
+            Config with specs propagated to nested groups.
+        """
+        # Attach specs to group-level sub-configs
+        for group_key, (spec, _) in self._groups.items():
+            if group_key in resolved and isinstance(resolved[group_key], dict):
+                resolved[group_key] = Config(resolved[group_key], spec=spec, path=group_key)
+
+        return Config(resolved)
+
+    def _track_sources(self, config: dict[str, Any], source_map: dict[str, str], label: str, prefix: str = "") -> None:
+        """Recursively track the source of each key path in a loaded config.
+
+        Args:
+            config: The loaded configuration dictionary.
+            source_map: The source map to populate (mutated in place).
+            label: The source label (e.g., "base.yaml", "CLI").
+            prefix: Current key path prefix for nested keys.
+        """
+        for key, value in config.items():
+            full_path = f"{prefix}.{key}" if prefix else key
+            source_map[full_path] = label
+            if isinstance(value, dict):
+                self._track_sources(value, source_map, label, full_path)

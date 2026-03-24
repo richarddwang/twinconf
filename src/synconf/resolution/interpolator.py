@@ -112,17 +112,13 @@ class CircularInterpolationError(InterpolationError):
 class UndefinedReferenceError(InterpolationError):
     """Raised when referencing undefined config key."""
 
-    def __init__(self, path: str, available_keys: list[str] | None = None) -> None:
+    def __init__(self, path: str) -> None:
         """Initialize with the undefined path.
 
         Args:
             path: The dotted path that was not found.
-            available_keys: Optional list of available keys for suggestion.
         """
-        msg = f"Undefined reference: '{path}'"
-        if available_keys:
-            msg += f". Available keys: {', '.join(available_keys[:5])}"
-        super().__init__(msg)
+        super().__init__(f"Undefined reference: '{path}'")
         self.path = path
 
 
@@ -160,24 +156,25 @@ class Interpolator:
         self._resolution_stack: list[str] = []
         # Cache for resolved values to avoid re-computation
         self._resolved_cache: dict[str, Any] = {}
+        # Collected errors during resolution
+        self._errors: list[str] = []
 
-    def resolve_all(self, config: dict[str, Any]) -> dict[str, Any]:
+    def resolve_all(self, config: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         """Resolve all ~{...} interpolations in a config dictionary.
+
+        Collects all errors instead of raising on the first one.
 
         Args:
             config: The configuration dictionary to process.
 
         Returns:
-            A new config dict with all interpolations resolved.
-
-        Raises:
-            CircularInterpolationError: If circular reference is detected.
-            UndefinedReferenceError: If referencing nonexistent key.
-            ExpressionError: If expression is invalid or unsafe.
+            Tuple of (resolved config dict, list of error messages).
+            Values that fail to resolve are left as-is in the config.
         """
         # Reset state for fresh resolution
         self._resolution_stack = []
         self._resolved_cache = {}
+        self._errors = []
 
         # Deep copy to avoid mutating input
         result = self._deep_copy(config)
@@ -185,7 +182,7 @@ class Interpolator:
         # Resolve all values recursively
         self._resolve_dict(result, result, "")
 
-        return result
+        return result, self._errors
 
     def _resolve_dict(self, node: dict[str, Any], root: dict[str, Any], path_prefix: str) -> None:
         """Recursively resolve all string values in a dict.
@@ -199,8 +196,11 @@ class Interpolator:
             current_path = f"{path_prefix}.{key}" if path_prefix else key
 
             if isinstance(value, str) and INTERPOLATION_PATTERN.search(value):
-                # String with interpolation - resolve it
-                node[key] = self._resolve_string(value, root, current_path)
+                # String with interpolation - resolve it, collect errors
+                try:
+                    node[key] = self._resolve_string(value, root, current_path)
+                except InterpolationError as e:
+                    self._errors.append(str(e))
 
             elif isinstance(value, dict):
                 # Recurse into nested dict
@@ -222,7 +222,11 @@ class Interpolator:
             current_path = f"{path_prefix}[{i}]"
 
             if isinstance(item, str) and INTERPOLATION_PATTERN.search(item):
-                items[i] = self._resolve_string(item, root, current_path)
+                # Resolve, collect errors
+                try:
+                    items[i] = self._resolve_string(item, root, current_path)
+                except InterpolationError as e:
+                    self._errors.append(str(e))
 
             elif isinstance(item, dict):
                 self._resolve_dict(item, root, current_path)
@@ -345,12 +349,10 @@ class Interpolator:
 
             for i, part in enumerate(parts):
                 if not isinstance(current, dict):
-                    partial_path = ".".join(parts[: i + 1])
-                    raise UndefinedReferenceError(dotted_path, available_keys=list(root.keys()) if i == 0 else None)
+                    raise UndefinedReferenceError(dotted_path)
 
                 if part not in current:
-                    partial_path = ".".join(parts[: i + 1])
-                    raise UndefinedReferenceError(dotted_path, available_keys=list(current.keys()))
+                    raise UndefinedReferenceError(dotted_path)
 
                 current = current[part]
 
