@@ -2,35 +2,41 @@
 
 Learn the fundamental concepts of SynConf: initialization, TYPE system, help generation, and configuration sources.
 
-## Initialization (`init` / `call`)
+## Initialization (`init`)
 
-Once you have a configuration object, you can convert it back into a Python object or result using `.init()` (or its alias `.call()`).
-
-- **Classes**: `.init()` calls the constructor `__init__`.
-- **Functions**: `.call()` calls the function.
+Once you have a configuration object, call `.init()` to construct it — it works for both classes (calls `__init__`) and functions (calls the function directly).
 
 ```python
-# For a class config
-optimizer = config.optimizer.init() 
-
-# For a function config
-result = config.train_fn.call()
+# Works for both classes and functions
+optimizer = config.optimizer.init()
+result = config.train_fn.init()
 ```
 
-You can also pass runtime overrides:
+You can pass keyword overrides at init time:
 
 ```python
 # Override learning rate at runtime
 optimizer = config.optimizer.init(lr=0.01)
 ```
 
+`.call()` and `.instantiate()` are aliases for `.init()`.
+
+If a config has no `TYPE`, calling `.init()` raises:
+
+```
+ValueError: Cannot init 'optimizer': no TYPE specified in config
+```
+
 ## The `TYPE` Key
 
 The `TYPE` key in configuration specifies which callable to use. It can be:
 
-- A registered class name (e.g., `TYPE: Adam`)
-- A full python path (e.g., `TYPE: my_module.optimizers.Adam`)
+- A fully qualified module path to a class (e.g., `TYPE: my_module.optimizers.Adam`)
+- A fully qualified path to a function (e.g., `TYPE: my_module.create_optimizer`)
+- A fully qualified path to a static or class method (e.g., `TYPE: my_module.Trainer.create_callback`)
 - A standard library path (e.g., `TYPE: json.JSONDecoder`)
+
+When a class is registered with `parser.add()`, its short name is also registered as an alias (e.g., `TYPE: Adam` works if `Adam` was registered).
 
 SynConf ensures the specified `TYPE` is compatible with the expected type (subclass check).
 
@@ -117,17 +123,20 @@ Notice how `lr` now shows `0.001` instead of `???`, and `beta1` shows the config
 
 ### Filtered Help
 
-Use `--help.<key_path>` to show only arguments under a specific key path:
+Use `--help=<key>` to show only arguments under a specific key:
 
 ```bash
 # Show only optimizer arguments
-python your_script.py --help.optimizer
+python your_script.py config.yaml --help=optimizer
 
 # Show only trainer arguments
-python your_script.py --help.trainer
+python your_script.py config.yaml --help=trainer
+```
 
-# Show only nested optimizer within trainer
-python your_script.py --help.trainer.optimizer
+When using `parse_args()`, the `--help.<key>` dot-notation also works:
+
+```bash
+python your_script.py config.yaml --help.optimizer
 ```
 
 Programmatically:
@@ -136,8 +145,6 @@ Programmatically:
 # Filter to show only optimizer arguments
 print(parser.help(config_data, key_path_filter="optimizer"))
 ```
-
-This supports arbitrary nesting depth, allowing you to focus on specific configuration sections.
 
 ### Nested Object Configuration Expansion
 

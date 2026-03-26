@@ -1,14 +1,34 @@
-# SynConf Documentation
+# SynConf
 
 SynConf is a configuration management system that syncs with your code. It auto-detects argument schemas from function/class signatures and traces `**kwargs` through call chains.
 
-## Documentation Overview
+## Installation
 
-- **[Quick Start](docs/quickstart.md)** - Get started with SynConf in 5 minutes
-- **[Core Concepts](docs/core-concepts.md)** - Learn about initialization, TYPE system, help generation, and configuration sources
-- **[Validation](docs/validation.md)** - Understand type hints validation, TYPE compatibility checking, and strict validation
-- **[Interpolation](docs/interpolation.md)** - Master variable references and expression evaluation with `~{...}` syntax
-- **[Advanced Features](docs/advanced.md)** - Explore REMOVE, LIST, and sweep functionality
+```bash
+pip install synconf
+```
+
+## Quickstart
+
+```python
+from synconf import SynConfParser
+
+class Optimizer:
+    def __init__(self, lr: float, weight_decay: float = 0.0):
+        """Base optimizer."""
+        self.lr = lr
+        self.weight_decay = weight_decay
+
+# Create parser and register
+parser = SynConfParser()
+parser.add("optimizer", Optimizer)
+
+# Parse from YAML or CLI
+config = parser.parse("config.yaml", "--optimizer.lr=0.001")
+
+# Instantiate object
+optimizer = config.optimizer.init()
+```
 
 ## Key Features
 
@@ -50,34 +70,10 @@ python train.py config.yaml sweep --model.lr=[1e-4,2e-5] --seed=[0,1,2]
 # Generates 6 configurations (2 × 3)
 ```
 
-## Installation
+## Documentation
 
-```bash
-pip install synconf
-```
-
-## Quick Example
-
-```python
-from synconf import SynConfParser
-
-class Optimizer:
-    def __init__(self, lr: float, weight_decay: float = 0.0):
-        """Base optimizer."""
-        self.lr = lr
-        self.weight_decay = weight_decay
-
-# Create parser and register
-parser = SynConfParser()
-parser.add("optimizer", Optimizer)
-
-# Parse from YAML or CLI
-config = parser.parse("config.yaml", "--optimizer.lr=0.001")
-
-# Instantiate object
-optimizer = config.optimizer.init()
-```
-
-## License
-
-MIT License - see LICENSE file for details.
+- **[Quick Start](docs/quickstart.md)** - Get started with SynConf in 5 minutes
+- **[Core Concepts](docs/core-concepts.md)** - Learn about initialization, TYPE system, help generation, and configuration sources
+- **[Validation](docs/validation.md)** - Understand type hints validation, TYPE compatibility checking, and strict validation
+- **[Interpolation](docs/interpolation.md)** - Master variable references and expression evaluation with `~{...}` syntax
+- **[Advanced Features](docs/advanced.md)** - Explore REMOVE, LIST, and sweep functionality

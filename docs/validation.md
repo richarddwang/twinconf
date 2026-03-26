@@ -4,7 +4,7 @@ SynConf validates configurations at multiple stages to catch errors early and pr
 
 ## Type Hints Validation
 
-Arguments are validated against signature type hints using beartype for runtime type checking:
+Arguments are validated against signature type hints. All errors are **collected at once** and reported together in a single `ValueError`:
 
 ```python
 class Model:
@@ -14,18 +14,25 @@ class Model:
 parser = SynConfParser()
 parser.add("model", Model)
 
-# Valid
-config = parser.parse("--model.hidden_size=128", "--model.lr=0.01")
-
-# Invalid - raises validation error
-config = parser.parse("--model.hidden_size=not_an_int")
+# Raises ValueError listing all errors at once:
+config = parser.parse(
+    "--model.hidden_size=not_an_int",
+    "--model.lr=also_bad",
+    "--model.unknown_param=value",
+)
 # ValueError: Configuration validation failed:
-#   Invalid type for 'model.hidden_size': expected int, got str ('not_an_int')
+#   Invalid type for 'model.hidden_size': expected int, got str 'not_an_int' [source: CLI, owner: Model]
+#   Invalid type for 'model.lr': expected float, got str 'also_bad' [source: CLI, owner: Model]
+#   Unexpected parameter: 'model.unknown_param' [source: CLI, owner: Model]
 ```
+
+Each error line includes:
+- **`source`**: where the invalid value came from (`CLI`, `config.yaml`, `default value`, or `manual assignment`)
+- **`owner`**: the class or function whose signature defines the parameter
 
 ## Strict Validation
 
-By default, SynConf performs strict validation checking for:
+SynConf validates three categories of error, all collected and reported together:
 
 1. **Missing required parameters** - Parameters without defaults that aren't provided
 2. **Unexpected parameters** - Parameters provided that don't exist in the spec
@@ -44,7 +51,7 @@ parser.add("model", Model)
 # Missing required parameter 'hidden_size'
 config = parser.parse("--model.dropout=0.2")
 # ValueError: Configuration validation failed:
-#   Missing required parameter: 'model.hidden_size'
+#   Missing required parameter: 'model.hidden_size' [owner: Model]
 ```
 
 ### Unexpected Parameters
@@ -60,7 +67,7 @@ parser.add("model", Model)
 # 'unknown_param' doesn't exist in Model
 config = parser.parse("--model.hidden_size=128", "--model.unknown_param=value")
 # ValueError: Configuration validation failed:
-#   Unexpected parameter: 'model.unknown_param'
+#   Unexpected parameter: 'model.unknown_param' [source: CLI, owner: Model]
 ```
 
 This catches typos and configuration errors early:
@@ -68,14 +75,23 @@ This catches typos and configuration errors early:
 ```bash
 # Typo: 'hidden_siez' instead of 'hidden_size'
 python train.py --model.hidden_siez=128
-# Error: Unexpected parameter: 'model.hidden_siez'
+# Error: Unexpected parameter: 'model.hidden_siez' [source: CLI, owner: Model]
+```
+
+### Standalone Arguments
+
+Arguments registered without a callable (via `type_hint=`) omit the `owner` tag:
+
+```python
+parser.add("num_trials", type_hint=int)
+parser.parse()  # missing value
+# ValueError: Configuration validation failed:
+#   Missing required parameter: 'num_trials'
 ```
 
 ## TYPE Compatibility
 
-### Top-Level TYPE Compatibility
-
-`TYPE` values are checked against the registered base class:
+`TYPE` values are checked against the registered base class. An incompatible `TYPE` raises `ValueError` with the standard validation error format:
 
 ```python
 class Optimizer:
@@ -83,153 +99,62 @@ class Optimizer:
         pass
 
 class Adam(Optimizer):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    pass
 
 class Scheduler:  # Not related to Optimizer
     pass
 
 parser = SynConfParser()
 parser.add("optimizer", Optimizer)
-parser._resolver.register("Adam", Adam)
-parser._resolver.register("Scheduler", Scheduler)
 
 # Valid - Adam is subclass of Optimizer
-config = parser.parse("--optimizer.TYPE=Adam", "--optimizer.lr=0.001")
+config = parser.parse("--optimizer.TYPE=my_module.Adam", "--optimizer.lr=0.001")
 
 # Invalid - Scheduler is not subclass of Optimizer
-config = parser.parse("--optimizer.TYPE=Scheduler")
-# TypeError: TYPE Scheduler is not a subclass of expected type Optimizer
+config = parser.parse("--optimizer.TYPE=my_module.Scheduler")
+# ValueError: Configuration validation failed:
+#   TYPE Scheduler is not a subclass of expected type Optimizer [source: CLI]
 ```
 
-### Nested TYPE Compatibility
+The source tag shows where the incompatible TYPE was specified (`CLI` or a filename).
 
-When a parameter has a type hint and receives a nested config with `TYPE`, SynConf validates compatibility.
+## Validation on Assignment
 
-**For classes:** Checks if TYPE is a subclass of the parameter's type hint.
+After parsing, assigning an invalid value to a config field raises `TypeError` immediately:
 
 ```python
-class Optimizer:
-    def __init__(self, lr: float = 0.001):
-        self.lr = lr
-
-class Adam(Optimizer):
-    def __init__(self, beta1: float = 0.9, **kwargs):
-        super().__init__(**kwargs)
-        self.beta1 = beta1
-
-class Model:
-    def __init__(self, hidden_size: int, optimizer: Optimizer):
-        """Model with an optimizer.
-        
-        Args:
-            hidden_size: Hidden layer size.
-            optimizer: Optimizer instance.
-        """
-        self.hidden_size = hidden_size
-        self.optimizer = optimizer
-
 parser = SynConfParser()
 parser.add("model", Model)
-parser._resolver.register("Adam", Adam)
-```
+config = parser.parse("--model.lr=0.1")
 
-In your YAML config:
+# Raises TypeError right away
+config.model.lr = "bad_string"
+# TypeError: Invalid type for 'lr': expected float, got str 'bad_string' [source: manual assignment, owner: Model]
 
-```yaml
-model:
-  TYPE: Model
-  hidden_size: 64
-  optimizer:
-    TYPE: Adam  # ✓ Valid - Adam is subclass of Optimizer
-    lr: 0.01
-```
-
-If you use an incompatible type:
-
-```yaml
-model:
-  TYPE: Model
-  hidden_size: 64
-  optimizer:
-    TYPE: Scheduler  # ✗ Invalid - Scheduler is NOT a subclass of Optimizer
-```
-
-This will raise a `TypeError` during `parse()`:
-```
-TypeError: TYPE Scheduler is not a subclass of expected type Optimizer
-```
-
-**For functions:** Checks if the return type annotation matches the parameter's type hint.
-
-```python
-def build_optimizer(opt_type: str = "adam") -> Optimizer:
-    """Factory function that returns an Optimizer.
-    
-    Args:
-        opt_type: Type of optimizer to build.
-        
-    Returns:
-        An Optimizer instance.
-    """
-    if opt_type == "adam":
-        return Adam()
-    return Optimizer()
-
-parser._resolver.register("build_optimizer", build_optimizer)
-```
-
-```yaml
-model:
-  TYPE: Model
-  hidden_size: 64
-  optimizer:
-    TYPE: build_optimizer  # ✓ Valid - returns Optimizer
-    opt_type: adam
-```
-
-### Multi-Level Nesting
-
-Compatibility checking works recursively through arbitrary nesting levels:
-
-```yaml
-model:
-  TYPE: Model
-  optimizer:
-    TYPE: Adam
-    scheduler:
-      TYPE: StepLR  # Validated against scheduler type hint in Adam
-      step_size: 10
+# Valid assignment works
+config.model.lr = 0.05
 ```
 
 ## Error Messages
 
-SynConf provides clear, actionable error messages:
+SynConf provides clear, actionable error messages. Each error includes where the value came from (`source`) and which class or function defines the parameter (`owner`):
 
-### Type Mismatch
 ```
-Invalid type for 'model.hidden_size': expected int, got str ('not_an_int')
-```
-
-### Missing Required
-```
-Missing required parameter: 'model.hidden_size'
-```
-
-### Unexpected Parameter
-```
-Unexpected parameter: 'model.unknown_param'
+Configuration validation failed:
+  Invalid type for 'model.lr': expected float, got str 'not_a_float' [source: CLI, owner: Model]
+  Unexpected parameter: 'model.unknown_param' [source: CLI, owner: Model]
+  Missing required parameter: 'trainer.max_epochs' [owner: Trainer]
+  Invalid type for 'optimizer_fn.lr': expected float, got str 'not_a_float' [source: config.yaml, owner: create_optimizer]
+  Invalid type for 'seed': expected int, got str 'not_an_int' [source: default value, owner: _bad_seed]
+  Unexpected parameter: 'nonexistent' [source: CLI]
+  Missing required parameter: 'num_trials'
 ```
 
-### TYPE Incompatibility
-```
-TypeError: TYPE Scheduler is not a subclass of expected type Optimizer
-```
-
-### Circular Reference
-```
-Circular reference detected: a -> b -> c -> a
-```
+Source values:
+- `CLI` — value came from a command-line argument
+- `config.yaml` — value came from a YAML file (filename shown)
+- `default value` — the parameter's own default value has a wrong type
+- `manual assignment` — value was assigned directly after parsing
 
 ## Validation Order
 

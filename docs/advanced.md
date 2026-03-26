@@ -80,20 +80,22 @@ python train.py base.yaml debug.yaml --debug=REMOVE --verbose=REMOVE
 
 ### Example
 
-```python
-from synconf import SynConfParser
+Use `REMOVE` in YAML or pass `--key=REMOVE` from the CLI:
 
-parser = SynConfParser()
+```yaml
+# base.yaml
+model:
+  lr: 0.1
+  feature_x: true
 
-# Config 1: Base with fancy features
-config1 = {"model": {"lr": 0.1, "feature_x": True}}
+# override.yaml — removes feature_x during merge
+model:
+  feature_x: REMOVE
+```
 
-# Config 2: Remove feature_x
-config2 = {"model": {"feature_x": "REMOVE"}}
-
-# Result after merge
-config = parser.parse_from_dicts([config1, config2])
-# {"model": {"lr": 0.1}}  # feature_x is gone
+```bash
+# CLI removal
+python train.py base.yaml --model.feature_x=REMOVE
 ```
 
 ## LIST Specification
@@ -365,8 +367,8 @@ All configurations are validated **before** any experiments run:
 
 ```bash
 python train.py config.yaml sweep --model.lr=[1e-4,2e-5,invalid] --seed=[0,1,2]
-# Error: Configuration validation failed for config 3:
-#   Invalid type for 'model.lr': expected float, got str ('invalid')
+# ValueError: Configuration validation failed:
+#   Invalid type for 'model.lr': expected float, got str 'invalid' [source: CLI, owner: Model]
 
 # No experiments ran - failed fast
 ```

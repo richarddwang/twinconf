@@ -1,6 +1,6 @@
 ---
 applyTo: "tests/**/*"
-description: "Rules for writing and reviewing feature tests: structure, naming, and minimizing test cases."
+description: "Rules for editing tests: structure, naming, and minimizing test cases."
 ---
 # Constitution
 

@@ -142,13 +142,9 @@ Access environment variables with the `env:` prefix:
 paths:
   home: ~{env:HOME}                          # /Users/username
   data_dir: ~{env:HOME}/datasets             # Embedded in path
-  cache: ~{env:XDG_CACHE_HOME}               # System-specific
-
-experiment:
-  output: ~{env:HOME}/experiments/~{model.name}  # Combined with config refs
 ```
 
-If an environment variable is not set, an `UndefinedReferenceError` is raised with a clear error message.
+If an environment variable is not set, a `ValueError` is raised with the undefined reference message.
 
 ## CLI Usage
 
@@ -187,16 +183,28 @@ experiment:
     learning_rate: ~{base_config.lr}  # Chains through nested paths
 ```
 
-## Circular Reference Detection
+## Interpolation Errors
 
-SynConf detects circular references and raises a clear error:
+All interpolation errors are collected at once and reported as a `ValueError` with the standard format:
 
 ```yaml
-# ❌ This will raise CircularInterpolationError
-a: ~{b}
-b: ~{c}
-c: ~{a}  # Error: Circular reference detected: a -> b -> c -> a
+circular_a: ~{circular_b}
+circular_b: ~{circular_a}
+undefined: ~{nonexistent}
+dangerous: ~{__import__('os')}
 ```
+
+```
+ValueError: Configuration validation failed:
+  Circular reference detected: circular_b -> circular_a -> circular_b
+  Circular reference detected: circular_a -> circular_b -> circular_a
+  Undefined reference: 'nonexistent'
+  Invalid expression '~{__import__('os')}': access to '__import__' not allowed
+```
+
+- **Circular references** - show the full cycle path
+- **Undefined references** - report the missing key name
+- **Unsafe expressions** - dunder attributes and imports are not allowed
 
 The error message shows the full cycle path to help you identify the issue.
 
