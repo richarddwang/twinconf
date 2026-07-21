@@ -1,0 +1,11 @@
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'   # MR created or updated
+
+include:
+  - project: 'richardyy1188/sinopac-code-review'
+    ref: main
+    file: 'ci/code-review.gitlab-ci.yml'
+
+variables:
+  PLUGIN_REPO_PATH: 'richardyy1188/sinopac-code-review'
